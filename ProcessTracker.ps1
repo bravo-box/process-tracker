@@ -282,32 +282,34 @@ try {
     # Note: Dia2Lib.dll and TraceReloggerLib.dll are native/COM interop and will be loaded automatically
     # Note: netstandard2.0 DLLs work with .NET Framework 4.6.2+ when netstandard facade is available
     
-    # First, try to load optional dependencies if they exist in the script directory
-    # These are required by TraceEvent but may not be present in older .NET Framework versions
-    $optionalDependencies = @(
-        "System.Memory.dll",
-        "System.Buffers.dll", 
-        "System.Runtime.CompilerServices.Unsafe.dll",
-        "System.Numerics.Vectors.dll",
-        "System.Text.Json.dll",
-        "System.Text.Encodings.Web.dll",
-        "System.Reflection.Metadata.dll",
-        "System.Collections.Immutable.dll",
-        "Microsoft.Win32.Registry.dll",
-        "System.Security.AccessControl.dll",
-        "System.Security.Principal.Windows.dll"
-    )
+    # If two dependencies pin slightly different versions of the same assembly (e.g. across
+    # TraceEvent's own dependency chain), resolve to whichever one we already loaded instead of
+    # failing on an exact strong-name version match.
+    $onAssemblyResolve = [System.ResolveEventHandler] {
+        param($resolveSender, $resolveArgs)
+        $requestedName = (New-Object System.Reflection.AssemblyName($resolveArgs.Name)).Name
+        [System.AppDomain]::CurrentDomain.GetAssemblies() |
+            Where-Object { $_.GetName().Name -eq $requestedName } |
+            Select-Object -First 1
+    }
+    [System.AppDomain]::CurrentDomain.add_AssemblyResolve($onAssemblyResolve)
     
-    foreach ($dep in $optionalDependencies) {
-        $depPath = Join-Path $scriptDir $dep
-        if (Test-Path $depPath) {
-            try {
-                Write-Host "Loading dependency: $dep..." -ForegroundColor Gray
-                Add-Type -Path $depPath -ErrorAction SilentlyContinue
-            }
-            catch {
-                # Ignore if already loaded or failed to load
-            }
+    # Load every dependency DLL the installer placed next to this script (anything other than the
+    # four TraceEvent DLLs themselves, which are loaded explicitly below in the required order).
+    # Discovering these dynamically - rather than hardcoding names - keeps this in sync with
+    # whatever TraceEvent's transitive dependency tree happens to require.
+    $explicitDlls = @($fastSerializationDll, $traceEventDll, $dia2LibDll, $traceReloggerDll)
+    $optionalDependencies = Get-ChildItem -Path $scriptDir -Filter "*.dll" -ErrorAction SilentlyContinue |
+        Where-Object { $explicitDlls -notcontains $_.FullName } |
+        Select-Object -ExpandProperty FullName
+    
+    foreach ($depPath in $optionalDependencies) {
+        try {
+            Write-Host "Loading dependency: $(Split-Path -Leaf $depPath)..." -ForegroundColor Gray
+            Add-Type -Path $depPath -ErrorAction SilentlyContinue
+        }
+        catch {
+            # Ignore if already loaded or failed to load
         }
     }
     

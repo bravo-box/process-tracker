@@ -24,105 +24,97 @@ if ([string]::IsNullOrEmpty($scriptDir)) {
 Write-Host "=== ProcessTracker Dependency Installer ===" -ForegroundColor Cyan
 Write-Host "Target Directory: $scriptDir`n" -ForegroundColor Gray
 
-# Define required packages and their versions. DllPaths can list multiple DLLs pulled from one package.
-$packages = @(
-    @{ Name = "System.Memory"; Version = "4.5.5"; DllPaths = @("lib\netstandard2.0\System.Memory.dll") },
-    @{ Name = "System.Buffers"; Version = "4.5.1"; DllPaths = @("lib\netstandard2.0\System.Buffers.dll") },
-    @{ Name = "System.Runtime.CompilerServices.Unsafe"; Version = "6.0.0"; DllPaths = @("lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll") },
-    @{ Name = "System.Numerics.Vectors"; Version = "4.5.0"; DllPaths = @("lib\netstandard2.0\System.Numerics.Vectors.dll") },
-    @{ Name = "System.Text.Json"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Text.Json.dll") },
-    @{ Name = "System.Text.Encodings.Web"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Text.Encodings.Web.dll") },
-    @{ Name = "System.Reflection.Metadata"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Reflection.Metadata.dll") },
-    @{ Name = "System.Collections.Immutable"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Collections.Immutable.dll") },
-    @{ Name = "Microsoft.Win32.Registry"; Version = "5.0.0"; DllPaths = @("lib\netstandard2.0\Microsoft.Win32.Registry.dll") },
-    @{ Name = "System.Security.AccessControl"; Version = "6.0.0"; DllPaths = @("lib\netstandard2.0\System.Security.AccessControl.dll") },
-    @{ Name = "System.Security.Principal.Windows"; Version = "5.0.0"; DllPaths = @("lib\netstandard2.0\System.Security.Principal.Windows.dll") },
-    @{ Name = "Microsoft.Diagnostics.Tracing.TraceEvent"; Version = "3.1.16"; DllPaths = @(
-            "lib\netstandard2.0\Microsoft.Diagnostics.Tracing.TraceEvent.dll",
-            "lib\netstandard2.0\Microsoft.Diagnostics.FastSerialization.dll",
-            "lib\netstandard2.0\Dia2Lib.dll",
-            "lib\netstandard2.0\TraceReloggerLib.dll"
-        )
-    }
+# Only the root packages need to be listed here. Transitive dependencies (which run deep -
+# e.g. TraceEvent -> Microsoft.Diagnostics.NETCore.Client -> Microsoft.Extensions.Logging -> ...)
+# are resolved automatically by nuget.exe from each package's own pinned dependency versions,
+# instead of being hand-maintained (and going stale/mismatched) in this script.
+$rootPackages = @(
+    @{ Name = "System.Text.Json"; Version = "9.0.0" },
+    @{ Name = "Microsoft.Diagnostics.Tracing.TraceEvent"; Version = "3.1.16" }
 )
+
+# TFMs that actually load under .NET Framework 4.6.2+ / PowerShell 5.1, in priority order.
+$preferredTfms = @("netstandard2.0", "net462", "net47", "net471", "net472", "net48", "net461", "net46")
+$nativeArchs = @("amd64", "x86", "arm64")
 
 # Create temp directory for downloads
 $tempDir = Join-Path $env:TEMP "ProcessExplorer_Dependencies_$([guid]::NewGuid())"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-$installedDlls = @()
+$installedDlls = [System.Collections.Generic.List[string]]::new()
+$installedNative = [System.Collections.Generic.List[string]]::new()
 
 try {
-    foreach ($package in $packages) {
-        $packageName = $package.Name
-        $packageVersion = $package.Version
-        $dllRelativePaths = $package.DllPaths
-        
-        Write-Host "Processing: $packageName v$packageVersion..." -ForegroundColor Yellow
-        
-        # Download package
-        $nupkgUrl = "https://www.nuget.org/api/v2/package/$packageName/$packageVersion"
-        $nupkgPath = Join-Path $tempDir "$packageName.$packageVersion.nupkg"
-        
-        Write-Host "  Downloading..." -ForegroundColor Gray
-        try {
-            Invoke-WebRequest -Uri $nupkgUrl -OutFile $nupkgPath -UseBasicParsing -ErrorAction Stop
+    $nugetExe = Join-Path $tempDir "nuget.exe"
+    Write-Host "Downloading nuget.exe (used to resolve the full dependency tree)..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nugetExe -UseBasicParsing -ErrorAction Stop
+
+    $packagesDir = Join-Path $tempDir "packages"
+
+    foreach ($pkg in $rootPackages) {
+        Write-Host "`nResolving $($pkg.Name) v$($pkg.Version) and its dependencies..." -ForegroundColor Cyan
+        & $nugetExe install $pkg.Name -Version $pkg.Version -OutputDirectory $packagesDir -DependencyVersion Highest -NonInteractive -Verbosity quiet
+        if ($LASTEXITCODE -ne 0) {
+            throw "nuget.exe failed to install $($pkg.Name) $($pkg.Version) (exit code $LASTEXITCODE)"
         }
-        catch {
-            Write-Host "  Warning: Failed to download $packageName - $($_.Exception.Message)" -ForegroundColor Red
-            continue
-        }
-        
-        # Extract package (nupkg is just a zip file)
-        $extractPath = Join-Path $tempDir "$packageName.$packageVersion"
-        Write-Host "  Extracting..." -ForegroundColor Gray
-        
-        # Rename to .zip for extraction
-        $zipPath = [System.IO.Path]::ChangeExtension($nupkgPath, ".zip")
-        Move-Item -Path $nupkgPath -Destination $zipPath -Force
-        
-        Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-        
-        # Copy each DLL this package provides to the script directory
-        foreach ($dllRelativePath in $dllRelativePaths) {
-            $dllPath = Join-Path $extractPath $dllRelativePath
-            
-            if (Test-Path $dllPath) {
-                $destPath = Join-Path $scriptDir (Split-Path -Leaf $dllPath)
-                Copy-Item -Path $dllPath -Destination $destPath -Force
-                Write-Host "  Installed: $(Split-Path -Leaf $dllPath)" -ForegroundColor Green
-                $installedDlls += (Split-Path -Leaf $dllPath)
+    }
+
+    Write-Host "`nCopying assemblies to script directory..." -ForegroundColor Cyan
+    Get-ChildItem -Path $packagesDir -Directory | ForEach-Object {
+        $packageDir = $_.FullName
+
+        # Prefer the real Windows implementation under runtimes\win\lib over the generic lib folder -
+        # some packages (registry/security APIs) ship a stub under lib that throws at runtime.
+        $libRoots = @((Join-Path $packageDir "runtimes\win\lib"), (Join-Path $packageDir "lib"))
+
+        $chosenDir = $null
+        foreach ($libRoot in $libRoots) {
+            if (-not (Test-Path $libRoot)) { continue }
+            foreach ($tfm in $preferredTfms) {
+                $candidate = Join-Path $libRoot $tfm
+                if (Test-Path $candidate) { $chosenDir = $candidate; break }
             }
-            else {
-                Write-Host "  Warning: DLL not found at expected path: $dllRelativePath" -ForegroundColor Red
-                Write-Host "  Package may have different structure. Searching..." -ForegroundColor Yellow
-                
-                # Search for the DLL in the package
-                $dllName = Split-Path -Leaf $dllRelativePath
-                $foundDll = Get-ChildItem -Path $extractPath -Filter $dllName -Recurse -ErrorAction SilentlyContinue | 
-                            Where-Object { $_.FullName -like "*\lib\*" } | 
-                            Select-Object -First 1
-                
-                if ($foundDll) {
-                    $destPath = Join-Path $scriptDir $dllName
-                    Copy-Item -Path $foundDll.FullName -Destination $destPath -Force
-                    Write-Host "  Installed: $dllName (found at alternate location)" -ForegroundColor Green
-                    $installedDlls += $dllName
-                }
-                else {
-                    Write-Host "  Error: Could not find $dllName in package" -ForegroundColor Red
+            if ($chosenDir) { break }
+        }
+
+        if ($chosenDir) {
+            Get-ChildItem -Path $chosenDir -Filter "*.dll" | ForEach-Object {
+                Copy-Item -Path $_.FullName -Destination (Join-Path $scriptDir $_.Name) -Force
+                if ($installedDlls -notcontains $_.Name) {
+                    $installedDlls.Add($_.Name)
+                    Write-Host "  Installed: $($_.Name)" -ForegroundColor Green
                 }
             }
         }
-        
-        Write-Host ""
+
+        # ETW kernel sessions need the native DIA/KernelTraceControl DLLs alongside the script,
+        # under an arch subfolder (amd64/x86/arm64) - the same layout TraceEvent's MSBuild targets produce.
+        $nativeRoot = Join-Path $packageDir "build\native"
+        if (Test-Path $nativeRoot) {
+            foreach ($arch in $nativeArchs) {
+                $archSrc = Join-Path $nativeRoot $arch
+                if (-not (Test-Path $archSrc)) { continue }
+                $archDest = Join-Path $scriptDir $arch
+                New-Item -ItemType Directory -Path $archDest -Force | Out-Null
+                Get-ChildItem -Path $archSrc -Filter "*.dll" | ForEach-Object {
+                    Copy-Item -Path $_.FullName -Destination (Join-Path $archDest $_.Name) -Force
+                    $entry = "$arch\$($_.Name)"
+                    if ($installedNative -notcontains $entry) {
+                        $installedNative.Add($entry)
+                        Write-Host "  Installed (native): $entry" -ForegroundColor Green
+                    }
+                }
+            }
+        }
     }
-    
-    Write-Host "=== Installation Complete ===" -ForegroundColor Green
-    Write-Host "`nInstalled DLLs:" -ForegroundColor Cyan
-    $installedDlls | ForEach-Object {
-        Write-Host "  - $_" -ForegroundColor Gray
+
+    Write-Host "`n=== Installation Complete ===" -ForegroundColor Green
+    Write-Host "`nInstalled managed DLLs:" -ForegroundColor Cyan
+    $installedDlls | Sort-Object | ForEach-Object { Write-Host "  - $_" -ForegroundColor Gray }
+    if ($installedNative.Count -gt 0) {
+        Write-Host "`nInstalled native DLLs:" -ForegroundColor Cyan
+        $installedNative | Sort-Object | ForEach-Object { Write-Host "  - $_" -ForegroundColor Gray }
     }
-    
+
     Write-Host "`nYou can now run ProcessTracker.ps1" -ForegroundColor Green
 }
 catch {
