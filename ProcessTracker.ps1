@@ -376,6 +376,50 @@ function Get-ResumedDailyWindow {
     return $result
 }
 
+function Update-MonitoredProcessList {
+    <#
+    .SYNOPSIS
+        Re-queries Get-Process for the target name and syncs the result into a thread-safe
+        PID set, so a process that starts/restarts/exits after the script begins is picked
+        up without requiring a restart of the script.
+    .DESCRIPTION
+        $ProcessSet is a System.Collections.Concurrent.ConcurrentDictionary[int,bool] shared
+        with the background ETW runspace - TryAdd/TryRemove are individually thread-safe, so
+        this can run concurrently with the event handlers' ContainsKey checks.
+    #>
+    param(
+        [string]$ProcessName,
+        [System.Collections.Concurrent.ConcurrentDictionary[int,bool]]$ProcessSet
+    )
+    
+    $currentProcesses = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
+    $currentIds = New-Object 'System.Collections.Generic.HashSet[int]'
+    if ($null -ne $currentProcesses) {
+        foreach ($proc in $currentProcesses) {
+            [void]$currentIds.Add($proc.Id)
+        }
+    }
+    
+    $added = New-Object 'System.Collections.Generic.List[int]'
+    $removed = New-Object 'System.Collections.Generic.List[int]'
+    
+    foreach ($id in $currentIds) {
+        if ($ProcessSet.TryAdd($id, $true)) {
+            $added.Add($id)
+        }
+    }
+    foreach ($existingId in $ProcessSet.Keys) {
+        if (-not $currentIds.Contains($existingId)) {
+            [bool]$dummy = $false
+            if ($ProcessSet.TryRemove($existingId, [ref]$dummy)) {
+                $removed.Add($existingId)
+            }
+        }
+    }
+    
+    return @{ Added = $added; Removed = $removed; CurrentCount = $currentIds.Count }
+}
+
 #endregion
 
 #region Main Script
@@ -580,18 +624,21 @@ catch {
 }
 
 # Get process IDs for the target process
+# ConcurrentDictionary (not HashSet) because this set is mutated by the main thread on each
+# refresh while the background ETW runspace concurrently reads it via ContainsKey.
 $processes = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue
-$processList = New-Object 'System.Collections.Generic.HashSet[int]'
+$processList = New-Object 'System.Collections.Concurrent.ConcurrentDictionary[int,bool]'
 
 if ($null -ne $processes) {
     foreach ($proc in $processes) {
-        [void]$processList.Add($proc.Id)
+        [void]$processList.TryAdd($proc.Id, $true)
     }
 }
 
 if ($processList.Count -eq 0) {
     Write-Host "Warning: No processes found with name '$ProcessName'" -ForegroundColor Yellow
     Write-Host "The script will continue monitoring, but no data will be captured until the process starts." -ForegroundColor Yellow
+    Write-Host "Double-check the exact image name (Get-Process shows it without '.exe') - e.g. Microsoft Defender for Endpoint's sensor runs as 'MsSense', not 'Sense'." -ForegroundColor Yellow
 }
 
 # Display monitored PIDs
@@ -600,7 +647,7 @@ Write-Host "####################################################################
 $timestamp = Get-Date -Format "M/d/yyyy HH:mm:ss"
 Write-Host "$timestamp - Started capturing bytes sent/received for $ProcessName.exe"
 if ($processList.Count -gt 0) {
-    Write-Host "Monitoring PID: $($processList -join ', ')"
+    Write-Host "Monitoring PID: $($processList.Keys -join ', ')"
 }
 Write-Host "#####################################################################################"
 Write-Host
@@ -726,7 +773,7 @@ try {
                         [Console]::WriteLine("Recv: PID=$processId Size=$size")
                     }
                     
-                    if ($processList.Contains($processId) -and $size -gt 0) {
+                    if ($processList.ContainsKey($processId) -and $size -gt 0) {
                         $counters['Received'] = $counters['Received'] + $size
                         $counters['DailyReceived'] = $counters['DailyReceived'] + $size
                         if ($DebugEvents) {
@@ -762,7 +809,7 @@ try {
                         [Console]::WriteLine("Send: PID=$processId Size=$size")
                     }
                     
-                    if ($processList.Contains($processId) -and $size -gt 0) {
+                    if ($processList.ContainsKey($processId) -and $size -gt 0) {
                         $counters['Sent'] = $counters['Sent'] + $size
                         $counters['DailySent'] = $counters['DailySent'] + $size
                         if ($DebugEvents) {
@@ -812,6 +859,19 @@ try {
         # Check for shutdown
         if ($script:shutdownRequested) {
             break
+        }
+        
+        # Re-sync the monitored PID set so a process that (re)started, or spawned/exited
+        # additional instances, since the last check is picked up without a script restart.
+        $pidChanges = Update-MonitoredProcessList -ProcessName $ProcessName -ProcessSet $processList
+        if ($pidChanges.Added.Count -gt 0) {
+            Write-Host "Now monitoring new PID(s): $($pidChanges.Added -join ', ')" -ForegroundColor Cyan
+        }
+        if ($pidChanges.Removed.Count -gt 0) {
+            Write-Host "Stopped monitoring exited PID(s): $($pidChanges.Removed -join ', ')" -ForegroundColor Gray
+        }
+        if ($pidChanges.CurrentCount -eq 0) {
+            Write-Host "Warning: No running processes named '$ProcessName' - no traffic can be captured until it starts." -ForegroundColor Yellow
         }
         
         # Read counters with null-safe handling
