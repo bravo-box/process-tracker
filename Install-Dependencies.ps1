@@ -125,5 +125,12 @@ finally {
     }
 }
 
-Write-Host "`nPress any key to exit..."
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+# RawUI.ReadKey isn't supported in the VS Code/ISE integrated console, so fall back to Read-Host there
+if ($Host.Name -eq 'ConsoleHost') {
+    Write-Host "`nPress any key to exit..."
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+else {
+    Write-Host "`nPress Enter to exit..."
+    $null = Read-Host
+}
