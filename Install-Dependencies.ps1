@@ -52,7 +52,11 @@ try {
 
     foreach ($pkg in $rootPackages) {
         Write-Host "`nResolving $($pkg.Name) v$($pkg.Version) and its dependencies..." -ForegroundColor Cyan
-        & $nugetExe install $pkg.Name -Version $pkg.Version -OutputDirectory $packagesDir -DependencyVersion Highest -NonInteractive -Verbosity quiet
+        # Lowest pins each transitive dependency to the minimum version its parent declares (what it
+        # was actually built/tested against). Highest floats to the newest release on nuget.org, which
+        # can land on a modern SDK-only package layout (buildTransitive-only, no netstandard2.0 lib)
+        # that both breaks .NET Framework 4.6.2 compatibility and crashes nuget.exe's classic installer.
+        & $nugetExe install $pkg.Name -Version $pkg.Version -OutputDirectory $packagesDir -DependencyVersion Lowest -NonInteractive -Verbosity quiet
         if ($LASTEXITCODE -ne 0) {
             throw "nuget.exe failed to install $($pkg.Name) $($pkg.Version) (exit code $LASTEXITCODE)"
         }
