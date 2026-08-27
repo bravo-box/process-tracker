@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ProcessTracker - Local Traffic Visualizer</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e38;
+    --text: #e6e8ec;
+    --muted: #9aa2af;
+    --accent: #4da3ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  h2 { font-size: 15px; margin: 0 0 12px 0; color: var(--muted); font-weight: 600; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 18px;
+  }
+  .drop {
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 22px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .drop:hover, .drop.drag { border-color: var(--accent); color: var(--text); }
+  .drop input { display: none; }
+  .row { display: flex; gap: 16px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 220px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; }
+  .card {
+    background: #1d212b;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    min-width: 150px;
+    flex: 1;
+  }
+  .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .card .value { font-size: 20px; font-weight: 600; margin-top: 4px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px 0; }
+  .legend label { display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; user-select: none; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  canvas { width: 100%; display: block; background: #12151b; border-radius: 8px; }
+  .canvas-wrap { position: relative; }
+  .tooltip {
+    position: absolute;
+    background: #1d212b;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 12px;
+    pointer-events: none;
+    display: none;
+    white-space: nowrap;
+    z-index: 10;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+  .table-scroll { max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+  select, button {
+    background: #1d212b;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>ProcessTracker Traffic Visualizer</h1>
+<div class="sub">Fully local/offline. Load the CSV logs produced by ProcessTracker.ps1 - nothing is uploaded anywhere.</div>
+
+<div class="panel">
+  <div class="row">
+    <div>
+      <h2>Main interval log(s) - <code>*-DataLogging.csv</code></h2>
+      <label class="drop" id="dropInterval">
+        Drop file(s) here or click to choose<br>(BytesSentDelta/BytesReceivedDelta schema)
+        <input type="file" id="fileInterval" accept=".csv" multiple>
+      </label>
+    </div>
+    <div>
+      <h2>24-hour rollup log(s) - <code>*-DataLogging_24Hour.csv</code></h2>
+      <label class="drop" id="dropDaily">
+        Drop file(s) here or click to choose<br>(Daily/Partial period totals)
+        <input type="file" id="fileDaily" accept=".csv" multiple>
+      </label>
+    </div>
+  </div>
+</div>
+
+<div id="intervalSection" style="display:none">
+  <div class="panel">
+    <h2>Interval Summary</h2>
+    <div class="cards" id="intervalCards"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Bytes per Interval (Sent / Received)</h2>
+    <div class="legend" id="intervalLegend"></div>
+    <div class="canvas-wrap">
+      <canvas id="intervalChart" height="260"></canvas>
+      <div class="tooltip" id="intervalTooltip"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Cumulative Total Bytes</h2>
+    <div class="canvas-wrap">
+      <canvas id="cumulativeChart" height="220"></canvas>
+      <div class="tooltip" id="cumulativeTooltip"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Raw Rows</h2>
+    <div class="table-scroll" id="intervalTable"></div>
+  </div>
+</div>
+
+<div id="dailySection" style="display:none">
+  <div class="panel">
+    <h2>24-Hour Rollup Summary</h2>
+    <div class="cards" id="dailyCards"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Bytes per Day</h2>
+    <div class="legend" id="dailyLegend"></div>
+    <div class="canvas-wrap">
+      <canvas id="dailyChart" height="260"></canvas>
+      <div class="tooltip" id="dailyTooltip"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Raw Rows</h2>
+    <div class="table-scroll" id="dailyTable"></div>
+  </div>
+</div>
+
+<div class="empty" id="emptyState">No files loaded yet.</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const PALETTE = ['#4da3ff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8', '#66d9e8', '#ff922b', '#a9e34b'];
+  let colorIndex = 0;
+  const seriesColors = new Map();
+  function colorFor(key) {
+    if (!seriesColors.has(key)) {
+      seriesColors.set(key, PALETTE[colorIndex % PALETTE.length]);
+      colorIndex++;
+    }
+    return seriesColors.get(key);
+  }
+
+  function fmtBytes(n) {
+    n = Number(n) || 0;
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0;
+    let v = Math.abs(n);
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    const sign = n < 0 ? '-' : '';
+    return sign + v.toFixed(v < 10 && i > 0 ? 2 : 1) + ' ' + units[i];
+  }
+
+  function parseCsv(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+    if (lines.length < 2) return { header: [], rows: [] };
+    const header = lines[0].split(',').map(h => h.trim());
+    const rows = lines.slice(1).map(l => l.split(','));
+    return { header, rows };
+  }
+
+  function parseTimestamp(s) {
+    // Expected format: yyyy-MM-dd HH:mm:ss
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/.exec(s.trim());
+    if (!m) return new Date(s);
+    return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  }
+
+  // ---- File loading ----
+
+  function wireDropZone(dropId, inputId, onFiles) {
+    const drop = document.getElementById(dropId);
+    const input = document.getElementById(inputId);
+    drop.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => onFiles(Array.from(input.files)));
+    ['dragenter', 'dragover'].forEach(evt =>
+      drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('drag'); }));
+    ['dragleave', 'drop'].forEach(evt =>
+      drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+    drop.addEventListener('drop', e => {
+      const files = Array.from(e.dataTransfer.files).filter(f => f.name.toLowerCase().endsWith('.csv'));
+      if (files.length) onFiles(files);
+    });
+  }
+
+  function readFiles(files) {
+    return Promise.all(files.map(f => f.text().then(text => ({ name: f.name, text }))));
+  }
+
+  // ---- Interval (main) log ----
+
+  let intervalRows = []; // { series, timestamp, sentDelta, recvDelta, sentCum, recvCum, periodType }
+
+  function ingestIntervalFile(name, text) {
+    const { header, rows } = parseCsv(text);
+    // Expected: Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSentDelta,BytesReceivedDelta,TotalBytesDelta,BytesSent,BytesReceived,TotalBytes
+    const idx = {
+      ts: header.indexOf('Timestamp'), cn: header.indexOf('ComputerName'), pn: header.indexOf('ProcessName'),
+      pt: header.indexOf('PeriodType'), sd: header.indexOf('BytesSentDelta'), rd: header.indexOf('BytesReceivedDelta'),
+      sc: header.indexOf('BytesSent'), rc: header.indexOf('BytesReceived')
+    };
+    if (idx.ts < 0 || idx.sd < 0 || idx.rd < 0) {
+      alert('"' + name + '" does not look like a main interval log (expected BytesSentDelta/BytesReceivedDelta columns).');
+      return;
+    }
+    for (const f of rows) {
+      if (f.length <= Math.max(idx.ts, idx.cn, idx.pn, idx.pt, idx.sd, idx.rd, idx.sc, idx.rc)) continue;
+      const periodType = f[idx.pt];
+      if (periodType !== 'Interval' && periodType !== 'Final') continue;
+      intervalRows.push({
+        series: (f[idx.pn] || 'unknown') + '@' + (f[idx.cn] || 'unknown'),
+        timestamp: parseTimestamp(f[idx.ts]),
+        timestampRaw: f[idx.ts],
+        sentDelta: Number(f[idx.sd]) || 0,
+        recvDelta: Number(f[idx.rd]) || 0,
+        sentCum: idx.sc >= 0 ? Number(f[idx.sc]) || 0 : null,
+        recvCum: idx.rc >= 0 ? Number(f[idx.rc]) || 0 : null,
+        periodType
+      });
+    }
+    intervalRows.sort((a, b) => a.timestamp - b.timestamp);
+    renderIntervalSection();
+  }
+
+  function renderIntervalSection() {
+    document.getElementById('emptyState').style.display = 'none';
+    const section = document.getElementById('intervalSection');
+    if (intervalRows.length === 0) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+
+    const seriesNames = [...new Set(intervalRows.map(r => r.series))];
+
+    // Summary cards
+    let totalSent = 0, totalRecv = 0;
+    for (const r of intervalRows) { totalSent += r.sentDelta; totalRecv += r.recvDelta; }
+    const first = intervalRows[0], last = intervalRows[intervalRows.length - 1];
+    const cards = [
+      ['Total Sent', fmtBytes(totalSent)],
+      ['Total Received', fmtBytes(totalRecv)],
+      ['Combined', fmtBytes(totalSent + totalRecv)],
+      ['Data Points', String(intervalRows.length)],
+      ['Series', String(seriesNames.length)],
+      ['Range', first.timestampRaw + ' -> ' + last.timestampRaw]
+    ];
+    document.getElementById('intervalCards').innerHTML = cards.map(([l, v]) =>
+      `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
+
+    // Legend (per-series toggles apply to both sent+received of that series)
+    const legendEl = document.getElementById('intervalLegend');
+    legendEl.innerHTML = seriesNames.map(s => {
+      const c = colorFor(s);
+      return `<label><input type="checkbox" checked data-series="${s}" class="ivl-toggle">
+        <span class="swatch" style="background:${c}"></span>${s}</label>`;
+    }).join('');
+    legendEl.querySelectorAll('.ivl-toggle').forEach(cb => cb.addEventListener('change', drawIntervalCharts));
+
+    drawIntervalCharts();
+    renderTable('intervalTable', intervalRows, [
+      ['timestampRaw', 'Timestamp'], ['series', 'Process@Computer'], ['periodType', 'Period'],
+      ['sentDelta', 'Sent (delta)', fmtBytes], ['recvDelta', 'Received (delta)', fmtBytes],
+      ['sentCum', 'Sent (cumulative)', fmtBytes], ['recvCum', 'Received (cumulative)', fmtBytes]
+    ]);
+  }
+
+  function activeSeries(legendId) {
+    return new Set(Array.from(document.querySelectorAll('#' + legendId + ' input:checked')).map(cb => cb.dataset.series));
+  }
+
+  function drawIntervalCharts() {
+    const active = activeSeries('intervalLegend');
+    const rows = intervalRows.filter(r => active.has(r.series));
+
+    const datasets = [];
+    for (const s of [...new Set(rows.map(r => r.series))]) {
+      const seriesRows = rows.filter(r => r.series === s);
+      datasets.push({ label: s + ' sent', color: colorFor(s), values: seriesRows.map(r => r.sentDelta), dash: false });
+      datasets.push({ label: s + ' recv', color: colorFor(s), values: seriesRows.map(r => r.recvDelta), dash: true });
+    }
+    const labels = rows.length ? rows.filter(r => r.series === [...new Set(rows.map(x => x.series))][0]).map(r => r.timestampRaw) : [];
+    drawLineChart('intervalChart', 'intervalTooltip', labels, datasets, fmtBytes);
+
+    // Cumulative chart: one line per series per metric, using the last known cumulative value at each point
+    const cumDatasets = [];
+    for (const s of [...new Set(rows.map(r => r.series))]) {
+      const seriesRows = rows.filter(r => r.series === s);
+      cumDatasets.push({ label: s + ' sent (cum)', color: colorFor(s), values: seriesRows.map(r => r.sentCum), dash: false });
+      cumDatasets.push({ label: s + ' recv (cum)', color: colorFor(s), values: seriesRows.map(r => r.recvCum), dash: true });
+    }
+    const cumLabels = rows.length ? rows.filter(r => r.series === [...new Set(rows.map(x => x.series))][0]).map(r => r.timestampRaw) : [];
+    drawLineChart('cumulativeChart', 'cumulativeTooltip', cumLabels, cumDatasets, fmtBytes);
+  }
+
+  // ---- Daily rollup log ----
+
+  let dailyRows = [];
+
+  function ingestDailyFile(name, text) {
+    const { header, rows } = parseCsv(text);
+    // Expected: Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSent,BytesReceived,TotalBytes
+    const idx = {
+      ts: header.indexOf('Timestamp'), cn: header.indexOf('ComputerName'), pn: header.indexOf('ProcessName'),
+      pt: header.indexOf('PeriodType'), s: header.indexOf('BytesSent'), r: header.indexOf('BytesReceived')
+    };
+    if (idx.ts < 0 || idx.s < 0 || idx.r < 0) {
+      alert('"' + name + '" does not look like a 24-hour rollup log (expected BytesSent/BytesReceived period-total columns).');
+      return;
+    }
+    for (const f of rows) {
+      if (f.length <= Math.max(idx.ts, idx.cn, idx.pn, idx.pt, idx.s, idx.r)) continue;
+      const periodType = f[idx.pt];
+      if (periodType !== 'Daily' && periodType !== 'Partial') continue;
+      dailyRows.push({
+        series: (f[idx.pn] || 'unknown') + '@' + (f[idx.cn] || 'unknown'),
+        timestamp: parseTimestamp(f[idx.ts]),
+        timestampRaw: f[idx.ts],
+        sent: Number(f[idx.s]) || 0,
+        recv: Number(f[idx.r]) || 0,
+        periodType
+      });
+    }
+    dailyRows.sort((a, b) => a.timestamp - b.timestamp);
+    renderDailySection();
+  }
+
+  function renderDailySection() {
+    document.getElementById('emptyState').style.display = 'none';
+    const section = document.getElementById('dailySection');
+    if (dailyRows.length === 0) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+
+    const seriesNames = [...new Set(dailyRows.map(r => r.series))];
+    let totalSent = 0, totalRecv = 0;
+    for (const r of dailyRows) { totalSent += r.sent; totalRecv += r.recv; }
+    const first = dailyRows[0], last = dailyRows[dailyRows.length - 1];
+    const cards = [
+      ['Total Sent', fmtBytes(totalSent)],
+      ['Total Received', fmtBytes(totalRecv)],
+      ['Combined', fmtBytes(totalSent + totalRecv)],
+      ['Windows', String(dailyRows.length)],
+      ['Series', String(seriesNames.length)],
+      ['Range', first.timestampRaw + ' -> ' + last.timestampRaw]
+    ];
+    document.getElementById('dailyCards').innerHTML = cards.map(([l, v]) =>
+      `<div class="card"><div class="label">${l}</div><div class="value">${v}</div></div>`).join('');
+
+    const legendEl = document.getElementById('dailyLegend');
+    legendEl.innerHTML = seriesNames.map(s => {
+      const c = colorFor(s);
+      return `<label><input type="checkbox" checked data-series="${s}" class="daily-toggle">
+        <span class="swatch" style="background:${c}"></span>${s}</label>`;
+    }).join('');
+    legendEl.querySelectorAll('.daily-toggle').forEach(cb => cb.addEventListener('change', drawDailyChart));
+
+    drawDailyChart();
+    renderTable('dailyTable', dailyRows, [
+      ['timestampRaw', 'Timestamp'], ['series', 'Process@Computer'], ['periodType', 'Period'],
+      ['sent', 'Sent', fmtBytes], ['recv', 'Received', fmtBytes]
+    ]);
+  }
+
+  function drawDailyChart() {
+    const active = activeSeries('dailyLegend');
+    const rows = dailyRows.filter(r => active.has(r.series));
+    const datasets = [];
+    const names = [...new Set(rows.map(r => r.series))];
+    for (const s of names) {
+      const seriesRows = rows.filter(r => r.series === s);
+      datasets.push({ label: s + ' sent', color: colorFor(s), values: seriesRows.map(r => r.sent), dash: false });
+      datasets.push({ label: s + ' recv', color: colorFor(s), values: seriesRows.map(r => r.recv), dash: true });
+    }
+    const labels = names.length ? rows.filter(r => r.series === names[0]).map(r => r.timestampRaw) : [];
+    drawLineChart('dailyChart', 'dailyTooltip', labels, datasets, fmtBytes);
+  }
+
+  // ---- Generic table renderer ----
+
+  function renderTable(containerId, rows, columns) {
+    const container = document.getElementById(containerId);
+    if (rows.length === 0) { container.innerHTML = '<div class="empty">No rows.</div>'; return; }
+    const head = '<thead><tr>' + columns.map(c => `<th>${c[1]}</th>`).join('') + '</tr></thead>';
+    const body = '<tbody>' + rows.slice().reverse().map(r =>
+      '<tr>' + columns.map(c => {
+        const val = r[c[0]];
+        const fmt = c[2];
+        return `<td>${fmt ? fmt(val) : (val === null || val === undefined ? '' : val)}</td>`;
+      }).join('') + '</tr>').join('') + '</tbody>';
+    container.innerHTML = `<table>${head}${body}</table>`;
+  }
+
+  // ---- Generic canvas line chart with hover tooltip ----
+
+  function drawLineChart(canvasId, tooltipId, labels, datasets, valueFormatter) {
+    const canvas = document.getElementById(canvasId);
+    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = canvas.parentElement.clientWidth;
+    const cssHeight = canvas.height;
+    canvas.width = cssWidth * dpr;
+    canvas.height = cssHeight * dpr;
+    canvas.style.height = cssHeight + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    const padding = { top: 16, right: 16, bottom: 28, left: 70 };
+    const plotW = cssWidth - padding.left - padding.right;
+    const plotH = cssHeight - padding.top - padding.bottom;
+
+    if (!labels.length || !datasets.length) {
+      ctx.fillStyle = '#9aa2af';
+      ctx.font = '13px sans-serif';
+      ctx.fillText('No data selected.', padding.left, padding.top + 20);
+      return;
+    }
+
+    let maxVal = 0;
+    for (const ds of datasets) for (const v of ds.values) if (v !== null && v > maxVal) maxVal = v;
+    if (maxVal === 0) maxVal = 1;
+    maxVal *= 1.1;
+
+    const n = labels.length;
+    const xStep = n > 1 ? plotW / (n - 1) : 0;
+    const xAt = i => padding.left + (n > 1 ? i * xStep : plotW / 2);
+    const yAt = v => padding.top + plotH - (v / maxVal) * plotH;
+
+    // Gridlines + y-axis labels
+    ctx.strokeStyle = '#2a2e38';
+    ctx.fillStyle = '#9aa2af';
+    ctx.font = '11px sans-serif';
+    ctx.lineWidth = 1;
+    const gridLines = 4;
+    for (let g = 0; g <= gridLines; g++) {
+      const v = (maxVal / gridLines) * g;
+      const y = yAt(v);
+      ctx.beginPath();
+      ctx.moveTo(padding.left, y);
+      ctx.lineTo(padding.left + plotW, y);
+      ctx.stroke();
+      ctx.fillText(valueFormatter(v), 4, y + 4);
+    }
+
+    // X-axis labels (thinned to avoid overlap)
+    const maxLabels = Math.max(2, Math.floor(plotW / 90));
+    const labelStep = Math.max(1, Math.ceil(n / maxLabels));
+    ctx.textAlign = 'center';
+    for (let i = 0; i < n; i += labelStep) {
+      ctx.fillText(labels[i], xAt(i), padding.top + plotH + 18);
+    }
+    ctx.textAlign = 'left';
+
+    // Series lines
+    for (const ds of datasets) {
+      ctx.strokeStyle = ds.color;
+      ctx.lineWidth = 2;
+      if (ds.dash) ctx.setLineDash([5, 4]); else ctx.setLineDash([]);
+      ctx.beginPath();
+      let started = false;
+      ds.values.forEach((v, i) => {
+        if (v === null || v === undefined) return;
+        const x = xAt(i), y = yAt(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+      });
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Hover tooltip
+    const tooltip = document.getElementById(tooltipId);
+    canvas.onmousemove = function (e) {
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      if (mx < padding.left || mx > padding.left + plotW) { tooltip.style.display = 'none'; return; }
+      let idx = n > 1 ? Math.round((mx - padding.left) / xStep) : 0;
+      idx = Math.max(0, Math.min(n - 1, idx));
+      let html = `<strong>${labels[idx]}</strong><br>`;
+      for (const ds of datasets) {
+        const v = ds.values[idx];
+        if (v === null || v === undefined) continue;
+        html += `<span style="color:${ds.color}">&#9679;</span> ${ds.label}: ${valueFormatter(v)}<br>`;
+      }
+      tooltip.innerHTML = html;
+      tooltip.style.display = 'block';
+      tooltip.style.left = Math.min(mx + 12, cssWidth - 180) + 'px';
+      tooltip.style.top = '8px';
+    };
+    canvas.onmouseleave = function () { tooltip.style.display = 'none'; };
+  }
+
+  // ---- Wire up ----
+
+  wireDropZone('dropInterval', 'fileInterval', files =>
+    readFiles(files).then(list => list.forEach(f => ingestIntervalFile(f.name, f.text))));
+  wireDropZone('dropDaily', 'fileDaily', files =>
+    readFiles(files).then(list => list.forEach(f => ingestDailyFile(f.name, f.text))));
+
+  window.addEventListener('resize', () => {
+    if (intervalRows.length) drawIntervalCharts();
+    if (dailyRows.length) drawDailyChart();
+  });
+})();
+</script>
+</body>
+</html>

@@ -22,6 +22,7 @@ Key capabilities:
 
 - Main script: ProcessTracker.ps1
 - Dependency installer: Install-Dependencies.ps1
+- Local CSV chart viewer: Visualize-Traffic.html
 
 ## Requirements
 
@@ -156,6 +157,14 @@ Resume behavior across restarts:
 - The main log's running cumulative totals (`BytesSent`/`BytesReceived`) are recovered from the last `Interval` row.
 - The in-progress 24-hour window (its start time and bytes accumulated so far) is reconstructed from the daily log plus any main-log rows written since the last completed `Daily` row, so a restart mid-window no longer loses that partial day of data.
 - If an existing CSV was written before the delta columns existed, its header row is rewritten in place to the current schema the next time the script runs (existing data rows are left as-is).
+
+## Visualizing the Data Locally
+
+`Visualize-Traffic.html` is a self-contained, offline chart viewer for the CSV logs - no server, no internet access, and no data leaves your machine (files are read directly in the browser).
+
+1. Double-click `Visualize-Traffic.html` to open it in any modern browser (Chrome/Edge/Firefox).
+2. Drop (or click to browse to) your `*-DataLogging.csv` file(s) into the first box, and/or your `*-DataLogging_24Hour.csv` file(s) into the second box. Multiple files/hosts/processes can be loaded together.
+3. View summary totals, a sent/received-over-time chart, a cumulative-total chart (main log only), and the raw rows in a sortable table. Use the legend checkboxes to toggle individual processes/computers on and off.
 
 ## Stopping the Script
 
