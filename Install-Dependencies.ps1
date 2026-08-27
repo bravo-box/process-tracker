@@ -24,30 +24,38 @@ if ([string]::IsNullOrEmpty($scriptDir)) {
 Write-Host "=== ProcessTracker Dependency Installer ===" -ForegroundColor Cyan
 Write-Host "Target Directory: $scriptDir`n" -ForegroundColor Gray
 
-# Define required packages and their versions
+# Define required packages and their versions. DllPaths can list multiple DLLs pulled from one package.
 $packages = @(
-    @{ Name = "System.Memory"; Version = "4.5.5"; DllPath = "lib\netstandard2.0\System.Memory.dll" },
-    @{ Name = "System.Buffers"; Version = "4.5.1"; DllPath = "lib\netstandard2.0\System.Buffers.dll" },
-    @{ Name = "System.Runtime.CompilerServices.Unsafe"; Version = "6.0.0"; DllPath = "lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll" },
-    @{ Name = "System.Numerics.Vectors"; Version = "4.5.0"; DllPath = "lib\netstandard2.0\System.Numerics.Vectors.dll" },
-    @{ Name = "System.Text.Json"; Version = "9.0.0"; DllPath = "lib\netstandard2.0\System.Text.Json.dll" },
-    @{ Name = "System.Text.Encodings.Web"; Version = "9.0.0"; DllPath = "lib\netstandard2.0\System.Text.Encodings.Web.dll" },
-    @{ Name = "System.Reflection.Metadata"; Version = "9.0.0"; DllPath = "lib\netstandard2.0\System.Reflection.Metadata.dll" },
-    @{ Name = "System.Collections.Immutable"; Version = "9.0.0"; DllPath = "lib\netstandard2.0\System.Collections.Immutable.dll" },
-    @{ Name = "Microsoft.Win32.Registry"; Version = "5.0.0"; DllPath = "lib\netstandard2.0\Microsoft.Win32.Registry.dll" },
-    @{ Name = "System.Security.AccessControl"; Version = "6.0.0"; DllPath = "lib\netstandard2.0\System.Security.AccessControl.dll" },
-    @{ Name = "System.Security.Principal.Windows"; Version = "5.0.0"; DllPath = "lib\netstandard2.0\System.Security.Principal.Windows.dll" }
+    @{ Name = "System.Memory"; Version = "4.5.5"; DllPaths = @("lib\netstandard2.0\System.Memory.dll") },
+    @{ Name = "System.Buffers"; Version = "4.5.1"; DllPaths = @("lib\netstandard2.0\System.Buffers.dll") },
+    @{ Name = "System.Runtime.CompilerServices.Unsafe"; Version = "6.0.0"; DllPaths = @("lib\netstandard2.0\System.Runtime.CompilerServices.Unsafe.dll") },
+    @{ Name = "System.Numerics.Vectors"; Version = "4.5.0"; DllPaths = @("lib\netstandard2.0\System.Numerics.Vectors.dll") },
+    @{ Name = "System.Text.Json"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Text.Json.dll") },
+    @{ Name = "System.Text.Encodings.Web"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Text.Encodings.Web.dll") },
+    @{ Name = "System.Reflection.Metadata"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Reflection.Metadata.dll") },
+    @{ Name = "System.Collections.Immutable"; Version = "9.0.0"; DllPaths = @("lib\netstandard2.0\System.Collections.Immutable.dll") },
+    @{ Name = "Microsoft.Win32.Registry"; Version = "5.0.0"; DllPaths = @("lib\netstandard2.0\Microsoft.Win32.Registry.dll") },
+    @{ Name = "System.Security.AccessControl"; Version = "6.0.0"; DllPaths = @("lib\netstandard2.0\System.Security.AccessControl.dll") },
+    @{ Name = "System.Security.Principal.Windows"; Version = "5.0.0"; DllPaths = @("lib\netstandard2.0\System.Security.Principal.Windows.dll") },
+    @{ Name = "Microsoft.Diagnostics.Tracing.TraceEvent"; Version = "3.1.16"; DllPaths = @(
+            "lib\netstandard2.0\Microsoft.Diagnostics.Tracing.TraceEvent.dll",
+            "lib\netstandard2.0\Microsoft.Diagnostics.FastSerialization.dll",
+            "lib\netstandard2.0\Dia2Lib.dll",
+            "lib\netstandard2.0\TraceReloggerLib.dll"
+        )
+    }
 )
 
 # Create temp directory for downloads
 $tempDir = Join-Path $env:TEMP "ProcessExplorer_Dependencies_$([guid]::NewGuid())"
 New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+$installedDlls = @()
 
 try {
     foreach ($package in $packages) {
         $packageName = $package.Name
         $packageVersion = $package.Version
-        $dllRelativePath = $package.DllPath
+        $dllRelativePaths = $package.DllPaths
         
         Write-Host "Processing: $packageName v$packageVersion..." -ForegroundColor Yellow
         
@@ -74,31 +82,35 @@ try {
         
         Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
         
-        # Copy DLL to script directory
-        $dllPath = Join-Path $extractPath $dllRelativePath
-        
-        if (Test-Path $dllPath) {
-            $destPath = Join-Path $scriptDir (Split-Path -Leaf $dllPath)
-            Copy-Item -Path $dllPath -Destination $destPath -Force
-            Write-Host "  Installed: $(Split-Path -Leaf $dllPath)" -ForegroundColor Green
-        }
-        else {
-            Write-Host "  Warning: DLL not found at expected path: $dllRelativePath" -ForegroundColor Red
-            Write-Host "  Package may have different structure. Searching..." -ForegroundColor Yellow
+        # Copy each DLL this package provides to the script directory
+        foreach ($dllRelativePath in $dllRelativePaths) {
+            $dllPath = Join-Path $extractPath $dllRelativePath
             
-            # Search for the DLL in the package
-            $dllName = Split-Path -Leaf $dllRelativePath
-            $foundDll = Get-ChildItem -Path $extractPath -Filter $dllName -Recurse -ErrorAction SilentlyContinue | 
-                        Where-Object { $_.FullName -like "*\lib\*" } | 
-                        Select-Object -First 1
-            
-            if ($foundDll) {
-                $destPath = Join-Path $scriptDir $dllName
-                Copy-Item -Path $foundDll.FullName -Destination $destPath -Force
-                Write-Host "  Installed: $dllName (found at alternate location)" -ForegroundColor Green
+            if (Test-Path $dllPath) {
+                $destPath = Join-Path $scriptDir (Split-Path -Leaf $dllPath)
+                Copy-Item -Path $dllPath -Destination $destPath -Force
+                Write-Host "  Installed: $(Split-Path -Leaf $dllPath)" -ForegroundColor Green
+                $installedDlls += (Split-Path -Leaf $dllPath)
             }
             else {
-                Write-Host "  Error: Could not find $dllName in package" -ForegroundColor Red
+                Write-Host "  Warning: DLL not found at expected path: $dllRelativePath" -ForegroundColor Red
+                Write-Host "  Package may have different structure. Searching..." -ForegroundColor Yellow
+                
+                # Search for the DLL in the package
+                $dllName = Split-Path -Leaf $dllRelativePath
+                $foundDll = Get-ChildItem -Path $extractPath -Filter $dllName -Recurse -ErrorAction SilentlyContinue | 
+                            Where-Object { $_.FullName -like "*\lib\*" } | 
+                            Select-Object -First 1
+                
+                if ($foundDll) {
+                    $destPath = Join-Path $scriptDir $dllName
+                    Copy-Item -Path $foundDll.FullName -Destination $destPath -Force
+                    Write-Host "  Installed: $dllName (found at alternate location)" -ForegroundColor Green
+                    $installedDlls += $dllName
+                }
+                else {
+                    Write-Host "  Error: Could not find $dllName in package" -ForegroundColor Red
+                }
             }
         }
         
@@ -107,8 +119,8 @@ try {
     
     Write-Host "=== Installation Complete ===" -ForegroundColor Green
     Write-Host "`nInstalled DLLs:" -ForegroundColor Cyan
-    Get-ChildItem -Path $scriptDir -Filter "System.*.dll" | ForEach-Object {
-        Write-Host "  - $($_.Name)" -ForegroundColor Gray
+    $installedDlls | ForEach-Object {
+        Write-Host "  - $_" -ForegroundColor Gray
     }
     
     Write-Host "`nYou can now run ProcessTracker.ps1" -ForegroundColor Green
