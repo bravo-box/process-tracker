@@ -86,10 +86,18 @@ try {
 
         if ($chosenDir) {
             Get-ChildItem -Path $chosenDir -Filter "*.dll" | ForEach-Object {
-                Copy-Item -Path $_.FullName -Destination (Join-Path $scriptDir $_.Name) -Force
-                if ($installedDlls -notcontains $_.Name) {
-                    $installedDlls.Add($_.Name)
-                    Write-Host "  Installed: $($_.Name)" -ForegroundColor Green
+                $destPath = Join-Path $scriptDir $_.Name
+                try {
+                    Copy-Item -Path $_.FullName -Destination $destPath -Force -ErrorAction Stop
+                    if ($installedDlls -notcontains $_.Name) {
+                        $installedDlls.Add($_.Name)
+                        Write-Host "  Installed: $($_.Name)" -ForegroundColor Green
+                    }
+                }
+                catch {
+                    # Already loaded by a prior ProcessTracker.ps1 run in this same PowerShell session -
+                    # .NET Framework locks a DLL's file for the life of the process once it's loaded.
+                    Write-Host "  Skipped (in use, likely already loaded in this session): $($_.Name)" -ForegroundColor Yellow
                 }
             }
         }
@@ -104,11 +112,16 @@ try {
                 $archDest = Join-Path $scriptDir $arch
                 New-Item -ItemType Directory -Path $archDest -Force | Out-Null
                 Get-ChildItem -Path $archSrc -Filter "*.dll" | ForEach-Object {
-                    Copy-Item -Path $_.FullName -Destination (Join-Path $archDest $_.Name) -Force
                     $entry = "$arch\$($_.Name)"
-                    if ($installedNative -notcontains $entry) {
-                        $installedNative.Add($entry)
-                        Write-Host "  Installed (native): $entry" -ForegroundColor Green
+                    try {
+                        Copy-Item -Path $_.FullName -Destination (Join-Path $archDest $_.Name) -Force -ErrorAction Stop
+                        if ($installedNative -notcontains $entry) {
+                            $installedNative.Add($entry)
+                            Write-Host "  Installed (native): $entry" -ForegroundColor Green
+                        }
+                    }
+                    catch {
+                        Write-Host "  Skipped (in use, likely already loaded in this session): $entry" -ForegroundColor Yellow
                     }
                 }
             }
