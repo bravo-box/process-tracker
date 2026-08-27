@@ -223,6 +223,35 @@ function Get-SafeEventProperty {
     }
 }
 
+function Update-CsvHeaderIfStale {
+    <#
+    .SYNOPSIS
+        Rewrites a CSV log's header row in place if it doesn't match the current schema
+        (e.g. an existing log from before delta columns were added), so old logs pick up
+        the new headings instead of keeping a stale/mismatched header forever.
+    #>
+    param(
+        [string]$CsvFilePath,
+        [string]$ExpectedHeader
+    )
+    
+    try {
+        if (-not (Test-Path $CsvFilePath)) {
+            return
+        }
+        
+        $lines = [System.IO.File]::ReadAllLines($CsvFilePath)
+        if ($lines.Count -gt 0 -and $lines[0] -ne $ExpectedHeader) {
+            $lines[0] = $ExpectedHeader
+            [System.IO.File]::WriteAllLines($CsvFilePath, $lines)
+            Write-Host "Updated stale header in: $CsvFilePath" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "Warning: Could not update CSV header for $CsvFilePath : $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 function Get-PreviousCsvTotals {
     <#
     .SYNOPSIS
@@ -504,6 +533,10 @@ catch {
 # Define CSV log file paths
 $csvLogFilePath = Join-Path $scriptDir "$env:ComputerName-$ProcessName-DataLogging.csv"
 $csvDailyLogFilePath = Join-Path $scriptDir "$env:ComputerName-$ProcessName-DataLogging_24Hour.csv"
+
+# Fix up headers from logs written before the delta columns existed, BEFORE opening StreamWriter (which locks the file)
+Update-CsvHeaderIfStale -CsvFilePath $csvLogFilePath -ExpectedHeader "Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSentDelta,BytesReceivedDelta,TotalBytesDelta,BytesSent,BytesReceived,TotalBytes"
+Update-CsvHeaderIfStale -CsvFilePath $csvDailyLogFilePath -ExpectedHeader "Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSent,BytesReceived,TotalBytes"
 
 # Recover previous cumulative totals from existing CSV BEFORE opening StreamWriter (which locks the file)
 $previousTotals = Get-PreviousCsvTotals -CsvFilePath $csvLogFilePath
