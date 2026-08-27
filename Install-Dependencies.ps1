@@ -24,17 +24,21 @@ if ([string]::IsNullOrEmpty($scriptDir)) {
 Write-Host "=== ProcessTracker Dependency Installer ===" -ForegroundColor Cyan
 Write-Host "Target Directory: $scriptDir`n" -ForegroundColor Gray
 
-# Only the root packages need to be listed here. Transitive dependencies (which run deep -
-# e.g. TraceEvent -> Microsoft.Diagnostics.NETCore.Client -> Microsoft.Extensions.Logging -> ...)
-# are resolved automatically by nuget.exe from each package's own pinned dependency versions,
-# instead of being hand-maintained (and going stale/mismatched) in this script.
+# Only the root package needs to be listed here; its transitive dependencies are resolved
+# automatically by nuget.exe. Pinned to 3.0.0 specifically because it's the last TraceEvent
+# release with a .NETFramework4.6.2 target and a single dependency (System.Runtime.CompilerServices.Unsafe) -
+# newer 3.1.x/3.2.x releases only ship netstandard2.0 and drag in Microsoft.Diagnostics.NETCore.Client,
+# which pulls the entire Microsoft.Extensions.Logging/DependencyInjection family and is prone to
+# resolving to modern SDK-only package versions that break both .NET Framework 4.6.2 and nuget.exe's
+# classic installer.
 $rootPackages = @(
-    @{ Name = "System.Text.Json"; Version = "9.0.0" },
-    @{ Name = "Microsoft.Diagnostics.Tracing.TraceEvent"; Version = "3.1.16" }
+    @{ Name = "Microsoft.Diagnostics.Tracing.TraceEvent"; Version = "3.0.0" }
 )
 
 # TFMs that actually load under .NET Framework 4.6.2+ / PowerShell 5.1, in priority order.
-$preferredTfms = @("netstandard2.0", "net462", "net47", "net471", "net472", "net48", "net461", "net46")
+# net462+ builds are preferred over netstandard2.0 when both exist, since they're compiled
+# directly against the target framework instead of relying on the netstandard facade.
+$preferredTfms = @("net462", "net47", "net471", "net472", "net48", "net461", "net46", "netstandard2.0")
 $nativeArchs = @("amd64", "x86", "arm64")
 
 # Create temp directory for downloads
