@@ -33,6 +33,9 @@
     This script uses the Microsoft.Diagnostics.Tracing.TraceEvent library to capture kernel-level network events
     for a specified process. It tracks bytes sent and received, provides periodic updates, and generates 24-hour summaries.
     
+    The main CSV log records both the per-interval delta (for summing into custom reporting periods, e.g. daily/
+    weekly totals for bandwidth planning) and the running cumulative total (for continuity across restarts).
+    
     Requirements:
     - PowerShell 5.1 or later
     - .NET Framework 4.6.2 or later
@@ -42,6 +45,9 @@
 
 .PARAMETER ProcessName
     The name of the process to monitor (without .exe extension). Default is "mssense".
+
+.PARAMETER IntervalSeconds
+    How often (in seconds) to flush accumulated byte counts to the CSV log. Default is 300 (5 minutes).
 
 .EXAMPLE
     .\ProcessExplorer.ps1 -ProcessName "mssense"
@@ -60,7 +66,11 @@ param(
     [switch]$DebugEvents,
 
     [Parameter()]
-    [int]$BufferSizeMB = 256
+    [int]$BufferSizeMB = 256,
+
+    [Parameter()]
+    [ValidateRange(10, 86400)]
+    [int]$IntervalSeconds = 300
 )
 
 # Strict mode for better error handling
@@ -111,7 +121,9 @@ function Write-Log {
 function Write-CsvLog {
     <#
     .SYNOPSIS
-        Writes a structured CSV row to the log file for Power BI analysis.
+        Writes a structured CSV row (period total only) to the log file for Power BI analysis.
+        Used for the daily/partial rollup log, where BytesSent/BytesReceived already represent
+        that period's total rather than a running cumulative counter.
     #>
     param(
         [System.IO.StreamWriter]$CsvFile,
@@ -138,6 +150,49 @@ function Write-CsvLog {
             $BytesSent, `
             $BytesReceived, `
             $totalBytes
+        
+        $CsvFile.WriteLine($csvRow)
+    }
+}
+
+function Write-DeltaCsvLog {
+    <#
+    .SYNOPSIS
+        Writes a structured CSV row to the main log, with both the delta for this period
+        (for summing into custom reporting windows) and the running cumulative total
+        (for continuity/monitoring) side by side.
+    #>
+    param(
+        [System.IO.StreamWriter]$CsvFile,
+        [string]$ComputerName,
+        [string]$ProcessName,
+        [string]$PeriodType,
+        [datetime]$StartTime,
+        [datetime]$EndTime,
+        [long]$BytesSentDelta,
+        [long]$BytesReceivedDelta,
+        [long]$BytesSentCumulative,
+        [long]$BytesReceivedCumulative
+    )
+    
+    if ($null -ne $CsvFile) {
+        $durationSeconds = [int](($EndTime - $StartTime).TotalSeconds)
+        $totalBytesDelta = $BytesSentDelta + $BytesReceivedDelta
+        $totalBytesCumulative = $BytesSentCumulative + $BytesReceivedCumulative
+        $timestamp = $EndTime.ToString('yyyy-MM-dd HH:mm:ss')
+        
+        $csvRow = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}" -f `
+            $timestamp, `
+            $ComputerName, `
+            $ProcessName, `
+            $PeriodType, `
+            $durationSeconds, `
+            $BytesSentDelta, `
+            $BytesReceivedDelta, `
+            $totalBytesDelta, `
+            $BytesSentCumulative, `
+            $BytesReceivedCumulative, `
+            $totalBytesCumulative
         
         $CsvFile.WriteLine($csvRow)
     }
@@ -191,22 +246,102 @@ function Get-PreviousCsvTotals {
         # Read the last non-empty line from the CSV
         $lines = [System.IO.File]::ReadAllLines($CsvFilePath)
         
-        # Walk backward to find the last "Interval" row (skip Final, Partial, empty lines)
+        # Walk backward to find the last "Interval" row (skip Final, empty lines)
         for ($i = $lines.Count - 1; $i -ge 1; $i--) {
             $line = $lines[$i].Trim()
             if ([string]::IsNullOrEmpty($line)) { continue }
             
             $fields = $line.Split(',')
-            # Expected: Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSent,BytesReceived,TotalBytes
-            if ($fields.Count -ge 8 -and $fields[3] -eq 'Interval') {
-                $result.BytesSent = [long]$fields[5]
-                $result.BytesReceived = [long]$fields[6]
+            # Expected: Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSentDelta,BytesReceivedDelta,TotalBytesDelta,BytesSent,BytesReceived,TotalBytes
+            if ($fields.Count -ge 11 -and $fields[3] -eq 'Interval') {
+                $result.BytesSent = [long]$fields[8]
+                $result.BytesReceived = [long]$fields[9]
                 return $result
             }
         }
     }
     catch {
         Write-Host "Warning: Could not read previous CSV totals: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    
+    return $result
+}
+
+function Get-ResumedDailyWindow {
+    <#
+    .SYNOPSIS
+        Reconstructs the in-progress 24-hour window (start time + accumulated bytes so far)
+        across script restarts, so a restart doesn't silently drop a partial day of data.
+    .DESCRIPTION
+        The window is resumed from the end of the last completed "Daily" row in the daily CSV
+        (or the earliest known activity if no daily rollup has completed yet), then the partial
+        bytes accumulated since that point are reconstructed by summing delta columns from the
+        main interval CSV.
+    #>
+    param(
+        [string]$DailyCsvFilePath,
+        [string]$MainCsvFilePath
+    )
+    
+    $result = @{ WindowStart = Get-Date; DailySent = [long]0; DailyReceived = [long]0 }
+    $windowStart = $null
+    
+    try {
+        if (Test-Path $DailyCsvFilePath) {
+            $dailyLines = [System.IO.File]::ReadAllLines($DailyCsvFilePath)
+            for ($i = $dailyLines.Count - 1; $i -ge 1; $i--) {
+                $line = $dailyLines[$i].Trim()
+                if ([string]::IsNullOrEmpty($line)) { continue }
+                
+                $fields = $line.Split(',')
+                # Expected: Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSent,BytesReceived,TotalBytes
+                if ($fields.Count -ge 8 -and $fields[3] -eq 'Daily') {
+                    $windowStart = [datetime]::ParseExact($fields[0], 'yyyy-MM-dd HH:mm:ss', $null)
+                    break
+                }
+            }
+        }
+        
+        if (-not (Test-Path $MainCsvFilePath)) {
+            if ($null -ne $windowStart) { $result.WindowStart = $windowStart }
+            return $result
+        }
+        
+        $mainLines = [System.IO.File]::ReadAllLines($MainCsvFilePath)
+        $sumSent = [long]0
+        $sumReceived = [long]0
+        $earliestTimestamp = $null
+        
+        foreach ($line in $mainLines) {
+            $trimmed = $line.Trim()
+            if ([string]::IsNullOrEmpty($trimmed)) { continue }
+            
+            $fields = $trimmed.Split(',')
+            if ($fields.Count -lt 11 -or ($fields[3] -ne 'Interval' -and $fields[3] -ne 'Final')) { continue }
+            
+            $rowTimestamp = [datetime]::ParseExact($fields[0], 'yyyy-MM-dd HH:mm:ss', $null)
+            if ($null -eq $earliestTimestamp -or $rowTimestamp -lt $earliestTimestamp) {
+                $earliestTimestamp = $rowTimestamp
+            }
+            
+            # No completed daily rollup yet - treat all history as part of the current window.
+            if ($null -eq $windowStart -or $rowTimestamp -gt $windowStart) {
+                $sumSent += [long]$fields[5]
+                $sumReceived += [long]$fields[6]
+            }
+        }
+        
+        if ($null -ne $windowStart) {
+            $result.WindowStart = $windowStart
+        }
+        elseif ($null -ne $earliestTimestamp) {
+            $result.WindowStart = $earliestTimestamp
+        }
+        $result.DailySent = $sumSent
+        $result.DailyReceived = $sumReceived
+    }
+    catch {
+        Write-Host "Warning: Could not resume in-progress daily window: $($_.Exception.Message)" -ForegroundColor Yellow
     }
     
     return $result
@@ -390,7 +525,7 @@ try {
     $csvLogFile.AutoFlush = $true
     
     if ($isNewFile) {
-        $csvLogFile.WriteLine("Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSent,BytesReceived,TotalBytes")
+        $csvLogFile.WriteLine("Timestamp,ComputerName,ProcessName,PeriodType,DurationSeconds,BytesSentDelta,BytesReceivedDelta,TotalBytesDelta,BytesSent,BytesReceived,TotalBytes")
     }
     
     # Create daily summary log with header if new file
@@ -437,15 +572,29 @@ if ($processList.Count -gt 0) {
 Write-Host "#####################################################################################"
 Write-Host
 
+# Resume the in-progress 24-hour window (start time + bytes so far) so a restart doesn't
+# silently drop a partial day of data.
+$resumedDailyWindow = Get-ResumedDailyWindow -DailyCsvFilePath $csvDailyLogFilePath -MainCsvFilePath $csvLogFilePath
+if ($resumedDailyWindow.DailySent -gt 0 -or $resumedDailyWindow.DailyReceived -gt 0) {
+    Write-Host "Resumed in-progress 24-hour window from $($resumedDailyWindow.WindowStart.ToString('yyyy-MM-dd HH:mm:ss')):" -ForegroundColor Cyan
+    Write-Host ("  Sent so far: {0:N0} bytes ({1:F2} MB)" -f $resumedDailyWindow.DailySent, ($resumedDailyWindow.DailySent / 1MB)) -ForegroundColor Cyan
+    Write-Host ("  Received so far: {0:N0} bytes ({1:F2} MB)" -f $resumedDailyWindow.DailyReceived, ($resumedDailyWindow.DailyReceived / 1MB)) -ForegroundColor Cyan
+}
+
 # Counter variables (thread-safe using synchronized hashtable)
 # Seed Sent/Received with previous totals so the running total continues across restarts
 $counters = [hashtable]::Synchronized(@{
     Received = [long]$previousTotals.BytesReceived
     Sent = [long]$previousTotals.BytesSent
-    DailyReceived = [long]0
-    DailySent = [long]0
-    DailyWindowStart = Get-Date
+    DailyReceived = [long]$resumedDailyWindow.DailyReceived
+    DailySent = [long]$resumedDailyWindow.DailySent
+    DailyWindowStart = $resumedDailyWindow.WindowStart
 })
+
+# Snapshot of the cumulative totals as of the last interval write, used to compute this
+# interval's delta (rather than re-logging the ever-growing cumulative total each time).
+$lastIntervalSent = $counters.Sent
+$lastIntervalReceived = $counters.Received
 
 # Flag for graceful shutdown
 $script:shutdownRequested = $false
@@ -624,8 +773,8 @@ try {
     
     # Main monitoring loop
     while (-not $script:shutdownRequested) {
-        # Wait for update interval (5 minutes)
-        Start-Sleep -Seconds 300
+        # Wait for update interval
+        Start-Sleep -Seconds $IntervalSeconds
         
         # Check for shutdown
         if ($script:shutdownRequested) {
@@ -688,22 +837,29 @@ try {
             $counters.DailyWindowStart = Get-Date
         }
         
-        # Log current status (5-minute interval)
+        # Log current status (per-interval delta vs. running cumulative total)
+        $deltaSent = $currentSent - $lastIntervalSent
+        $deltaReceived = $currentReceived - $lastIntervalReceived
         $timestamp = Get-Date -Format "M/d/yyyy HH:mm:ss"
-        $statusMsg = "$timestamp - Sent: {0:N0} bytes    Received: {1:N0} bytes" -f $currentSent, $currentReceived
+        $statusMsg = "$timestamp - Sent: {0:N0} bytes (+{1:N0})    Received: {2:N0} bytes (+{3:N0})" -f $currentSent, $deltaSent, $currentReceived, $deltaReceived
         Write-Host $statusMsg
         
         # Write CSV entry for this interval
         $intervalEnd = Get-Date
-        $intervalStart = $intervalEnd.AddSeconds(-300)
-        Write-CsvLog -CsvFile $csvLogFile `
+        $intervalStart = $intervalEnd.AddSeconds(-$IntervalSeconds)
+        Write-DeltaCsvLog -CsvFile $csvLogFile `
             -ComputerName $env:ComputerName `
             -ProcessName $ProcessName `
             -PeriodType "Interval" `
             -StartTime $intervalStart `
             -EndTime $intervalEnd `
-            -BytesSent $currentSent `
-            -BytesReceived $currentReceived
+            -BytesSentDelta $deltaSent `
+            -BytesReceivedDelta $deltaReceived `
+            -BytesSentCumulative $currentSent `
+            -BytesReceivedCumulative $currentReceived
+        
+        $lastIntervalSent = $currentSent
+        $lastIntervalReceived = $currentReceived
     }
 }
 catch {
@@ -831,14 +987,16 @@ finally {
     # Write final cumulative summary to CSV
     if ($null -ne $csvLogFile) {
         try {
-            Write-CsvLog -CsvFile $csvLogFile `
+            Write-DeltaCsvLog -CsvFile $csvLogFile `
                 -ComputerName $env:ComputerName `
                 -ProcessName $ProcessName `
                 -PeriodType "Final" `
                 -StartTime $counters.DailyWindowStart `
                 -EndTime $shutdownTime `
-                -BytesSent $finalSent `
-                -BytesReceived $finalReceived
+                -BytesSentDelta ($finalSent - $lastIntervalSent) `
+                -BytesReceivedDelta ($finalReceived - $lastIntervalReceived) `
+                -BytesSentCumulative $finalSent `
+                -BytesReceivedCumulative $finalReceived
         }
         catch {
             Write-Host "Warning: Could not write final summary to CSV log file." -ForegroundColor Yellow
